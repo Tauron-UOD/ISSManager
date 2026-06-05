@@ -264,8 +264,933 @@ tbody tr:hover td{background:#1a2234}
 </div><!-- /main -->
 
 <script>
+// ═══════════════════════════════════════════════════════════════════════════════
+// ISS MANAGER — OFFLINE LAYER
+// Replica tutta la logica di IssController.cs in JavaScript puro.
+// Viene usato solo quando le API locali non sono disponibili (es. GitHub Pages).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const IssOffline = (() => {
+  let D = null; // iss_data.json
+
+  function load(data) { D = data; }
+
+  // ─── HELPERS ──────────────────────────────────────────────────────────────
+  const nameHas = (n, kw) => (n||'').toLowerCase().includes(kw);
+  const isGK  = r => { r=(r||'').trim().toUpperCase(); return r==='PT'||r==='POR'||r==='GK'; };
+  const isDEF = r => { r=(r||'').trim().toUpperCase(); if(!r||isGK(r)) return false; return ['DC','TS','TD','LIB','DIF'].includes(r); };
+  const isMID = r => { r=(r||'').trim().toUpperCase(); if(!r) return true; return ['CC','CLS','CLD','MED','TRQ','CEN'].includes(r); };
+  const isFWD = r => { r=(r||'').trim().toUpperCase(); if(!r) return false; return !isGK(r)&&!isDEF(r)&&!isMID(r); };
+
+  const isMerda   = n => nameHas(n,'merda');
+  const isNazliga = n => nameHas(n,'nazliga');
+
+  function player(id)  { return D.Players.find(p => p.Id === id); }
+  function team(id)    { return D.Teams.find(t => t.Id === id); }
+  function league(id)  { return D.Leagues.find(l => l.Id === id); }
+  function tourn(id)   { return D.Tournaments.find(t => t.Id === id); }
+
+  function calcScore(stats) {
+    const totalRating = stats.filter(s=>s.Rating>0).reduce((a,s)=>a+s.Rating,0);
+    const statScore = stats.reduce((a,s)=>a+s.Goals*1+s.Assists*.5+(s.CleanSheet?2:0)-s.YellowCards*.2-s.RedCards*.5,0);
+    return Math.round((totalRating+statScore)*10)/10;
+  }
+
+  function buildAgg(matches, filterTeamIds=null) {
+    const map = {};
+    for (const m of matches) {
+      for (const ps of (m.PlayerStats||[])) {
+        if (filterTeamIds && !filterTeamIds.has(ps.TeamId)) continue;
+        if (!map[ps.PlayerId]) map[ps.PlayerId] = [];
+        map[ps.PlayerId].push(ps);
+      }
+    }
+    return Object.entries(map).map(([pid, stats]) => {
+      const p = player(pid); const t = p ? team(p.TeamId) : null; const l = t ? league(t.LeagueId) : null;
+      const ratings = stats.filter(s=>s.Rating>0).map(s=>s.Rating);
+      return {
+        playerId: pid, playerName: p?.Name||'?', photoPath: p?.PhotoPath||'',
+        role: p?.Role||'', teamName: t?.Name||'?', teamLogo: t?.LogoPath||'',
+        leagueName: l?.Name||'',
+        goals: stats.reduce((a,s)=>a+s.Goals,0),
+        assists: stats.reduce((a,s)=>a+s.Assists,0),
+        yellowCards: stats.reduce((a,s)=>a+s.YellowCards,0),
+        redCards: stats.reduce((a,s)=>a+s.RedCards,0),
+        cleanSheets: stats.filter(s=>s.CleanSheet).length,
+        mvpCount: stats.filter(s=>s.IsMvp).length,
+        matches: stats.length,
+        avgRating: ratings.length ? Math.round(ratings.reduce((a,b)=>a+b,0)/ratings.length*100)/100 : 0,
+        totalScore: calcScore(stats)
+      };
+    });
+  }
+
+  function buildXI(agg, minMatches=1) {
+    const used = new Set(); const xi = [];
+    function addRole(pos, pool, count) {
+      pool.filter(x=>!used.has(x.playerId)&&x.matches>=minMatches)
+        .sort((a,b)=>b.totalScore-a.totalScore).slice(0,count)
+        .forEach(p=>{ xi.push({position:pos,...p}); used.add(p.playerId); });
+    }
+    addRole('GK',  agg.filter(x=>isGK(x.role)),  1);
+    addRole('DEF', agg.filter(x=>isDEF(x.role)), 4);
+    addRole('MID', agg.filter(x=>isMID(x.role)), 4);
+    addRole('FWD', agg.filter(x=>isFWD(x.role)), 2);
+    return xi;
+  }
+
+  function getTournGroup(name) {
+    const n = (name||'').toLowerCase();
+    if (n.includes('merda')) {
+      if (n.includes('championship')) return 'MC';
+      if (n.includes('superlega'))    return 'SM';
+      if (n.includes('supercup')||n.includes('supercoppa')) return 'SC';
+      if (n.includes('cup')||n.includes('coppa'))           return 'CM';
+    }
+    if (n.includes('nazliga')) {
+      if (n.includes('supercup')||n.includes('supercoppa')) return 'NSC';
+      if (n.includes('cup')||n.includes('coppa'))           return 'NCU';
+      return 'NLG';
+    }
+    if (n.includes('supercup')||n.includes('supercoppa')) return 'CUP';
+    if (n.includes('cup')||n.includes('coppa')||n.includes('coupe')||n.includes('copa')) return 'CUP';
+    return 'LEAGUE';
+  }
+
+  function getGroup(n) {
+    if (nameHas(n,'nazliga')&&(nameHas(n,'supercup')||nameHas(n,'supercoppa')||nameHas(n,'nsc'))) return 'SUPERCOPPA';
+    if (nameHas(n,'nazliga')&&(nameHas(n,' cup')||nameHas(n,'coppa')||nameHas(n,'ncu'))) return 'COPPA';
+    if (nameHas(n,'nazliga')) return 'CAMPIONATO';
+    if (!nameHas(n,'merda')&&(nameHas(n,'supercup')||nameHas(n,'supercoppa'))) return 'SUPERCOPPA';
+    if (!nameHas(n,'merda')&&(nameHas(n,' cup')||nameHas(n,'coppa')||nameHas(n,'coupe')||nameHas(n,'copa'))) return 'COPPA';
+    if (!nameHas(n,'merda')) return 'CAMPIONATO';
+    return null;
+  }
+
+  function imgUrl(path) {
+    if (!path) return '';
+    return `api/image?path=${encodeURIComponent(path)}`;
+  }
+
+  // ─── ENDPOINTS ─────────────────────────────────────────────────────────────
+
+  function getLeagues() {
+    return D.Leagues.map(l => ({
+      id:l.Id, name:l.Name, abbr:l.Abbr, nationName:l.NationName,
+      flagCode:l.FlagCode, continent:l.Continent, logoPath:l.LogoPath,
+      teamCount: D.Teams.filter(t=>t.LeagueId===l.Id).length,
+      tournamentCount: D.Tournaments.filter(t=>t.LeagueId===l.Id).length
+    }));
+  }
+
+  function getTeamsByLeague(leagueId) {
+    return D.Teams.filter(t=>t.LeagueId===leagueId).map(t=>({
+      id:t.Id, name:t.Name, abbr:t.Abbr, logoPath:t.LogoPath,
+      homeKit:t.HomeKit?{primaryColor:t.HomeKit.PrimaryColor,secondaryColor:t.HomeKit.SecondaryColor,style:t.HomeKit.Style}:null, awayKit:t.AwayKit?{primaryColor:t.AwayKit.PrimaryColor,secondaryColor:t.AwayKit.SecondaryColor,style:t.AwayKit.Style}:null, type:t.Type, leagueId:t.LeagueId,
+      playerCount: D.Players.filter(p=>p.TeamId===t.Id).length
+    }));
+  }
+
+  function getLeagueOverview(leagueId) {
+    const lg = D.Leagues.find(l=>l.Id===leagueId); if(!lg) return null;
+    const teamIds = new Set(D.Teams.filter(t=>t.LeagueId===leagueId).map(t=>t.Id));
+    const isNaz = isNazliga(lg.Name||'');
+    const tournIds = new Set(isNaz
+      ? D.Tournaments.filter(t=>isNazliga(t.Name||'')).map(t=>t.Id)
+      : D.Tournaments.filter(t=>!isMerda(t.Name||'')&&!isNazliga(t.Name||'')&&(t.TeamIds||[]).some(id=>teamIds.has(id))).map(t=>t.Id));
+    const matches = D.Matches.filter(m=>tournIds.has(m.TournamentId));
+    const filterIds = isNaz ? null : teamIds;
+    const agg = buildAgg(matches, filterIds);
+    const topScorers = agg.sort((a,b)=>b.goals-a.goals).slice(0,15).map(x=>({
+      playerId:x.playerId, playerName:x.playerName, photoPath:x.photoPath,
+      teamName:x.teamName, teamLogo:x.teamLogo, goals:x.goals, assists:x.assists, mvpCount:x.mvpCount, totalScore:x.totalScore
+    }));
+    const trophies = D.TeamTrophies.filter(tt=>tournIds.has(tt.TournamentId)).map(tt=>{
+      const t2=tourn(tt.TournamentId); const tm=team(tt.TeamId);
+      return {title:tt.Title, iconPath:tt.IconPath, tournamentName:t2?.Name||'', season:t2?.Season||'', teamName:tm?.Name||'?', teamLogo:tm?.LogoPath||''};
+    }).sort((a,b)=>b.season.localeCompare(a.season));
+    const xi = buildXI(agg, 3);
+    const leagueOut={id:lg.Id,name:lg.Name,abbr:lg.Abbr,nationName:lg.NationName,flagCode:lg.FlagCode,continent:lg.Continent,logoPath:lg.LogoPath};
+    return {league:leagueOut, xi, topScorers, trophies};
+  }
+
+  function getLeagueIndividualTrophies(leagueId) {
+    const lg = D.Leagues.find(l=>l.Id===leagueId); if(!lg) return [];
+    const leagueTeamIds = new Set(D.Teams.filter(t=>t.LeagueId===leagueId).map(t=>t.Id));
+    const isNaz = isNazliga(lg.Name||'');
+    const leagueTournIds = new Set(isNaz
+      ? D.Tournaments.filter(t=>isNazliga(t.Name||'')).map(t=>t.Id)
+      : D.Tournaments.filter(t=>!isMerda(t.Name||'')&&!isNazliga(t.Name||'')&&(t.TeamIds||[]).some(id=>leagueTeamIds.has(id))).map(t=>t.Id));
+    const catLabel = {goals:'Capocannoniere',assists:'Assist Leader',mvp:'MVP',clean:'Clean Sheet'};
+    const catColor = {goals:'#fbbf24',assists:'#60a5fa',mvp:'#a78bfa',clean:'#34d399'};
+    const grouped = {};
+    D.PlayerTrophies.filter(pt=>leagueTournIds.has(pt.TournamentId)&&catLabel[pt.Category]).forEach(pt=>{
+      const t2=tourn(pt.TournamentId); const grp=getGroup(t2?.Name||''); if(!grp) return;
+      if(!grouped[grp]) grouped[grp]={};
+      if(!grouped[grp][pt.Category]) grouped[grp][pt.Category]={iconPath:pt.IconPath||'',tournLogo:t2?.Logo||'',seasons:{}};
+      const season=t2?.Season||'';
+      if(!grouped[grp][pt.Category].seasons[season]) grouped[grp][pt.Category].seasons[season]=[];
+      (pt.PlayerIds||[]).forEach(pid=>{
+        const p=player(pid); const tm=p?team(p.TeamId):null;
+        grouped[grp][pt.Category].seasons[season].push({playerId:pid,playerName:p?.Name||'?',photoPath:p?.PhotoPath||'',teamName:tm?.Name||'',teamLogo:tm?.LogoPath||''});
+      });
+    });
+    const order = ['CAMPIONATO','COPPA','SUPERCOPPA'];
+    return Object.entries(grouped).sort((a,b)=>order.indexOf(a[0])-order.indexOf(b[0])).map(([grp,cats])=>({
+      groupName:grp,
+      categories: Object.entries(cats).filter(([k])=>catLabel[k]).map(([k,v])=>({
+        category:k, label:catLabel[k], color:catColor[k], iconPath:v.iconPath, tournamentLogo:v.tournLogo,
+        winnersBySeason: Object.entries(v.seasons).sort((a,b)=>b[0].localeCompare(a[0])).map(([s,players])=>({season:s,players}))
+      }))
+    }));
+  }
+
+  function getLeagueStats(leagueId) {
+    const lg = D.Leagues.find(l=>l.Id===leagueId); if(!lg) return [];
+    const leagueTeamIds = new Set(D.Teams.filter(t=>t.LeagueId===leagueId).map(t=>t.Id));
+    const isNaz = isNazliga(lg.Name||'');
+    const leagueTournIds = new Set(isNaz
+      ? D.Tournaments.filter(t=>isNazliga(t.Name||'')).map(t=>t.Id)
+      : D.Tournaments.filter(t=>!isMerda(t.Name||'')&&!isNazliga(t.Name||'')&&(t.TeamIds||[]).some(id=>leagueTeamIds.has(id))).map(t=>t.Id));
+    const allPlayerIds = isNaz ? null : new Set(D.Players.filter(p=>leagueTeamIds.has(p.TeamId)||(p.TeamHistory||[]).some(h=>leagueTeamIds.has(h.TeamId))).map(p=>p.Id));
+    const allStats = [];
+    D.Matches.filter(m=>leagueTournIds.has(m.TournamentId)&&m.PlayerStats&&m.PlayerStats.length>0).forEach(m=>{
+      (m.PlayerStats||[]).filter(ps=>!allPlayerIds||allPlayerIds.has(ps.PlayerId)).forEach(ps=>allStats.push({tournId:m.TournamentId,ps}));
+    });
+    const nh=(n,kw)=>(n||'').toLowerCase().includes(kw);
+    function getGroupStats(filter) { return allStats.filter(x=>{ const t2=tourn(x.tournId); return t2&&filter(t2.Name||''); }); }
+    function makeRanking(title,col,stats,sel) {
+      const map={}; stats.forEach(({ps})=>{ if(!map[ps.PlayerId]) map[ps.PlayerId]=[]; map[ps.PlayerId].push(ps); });
+      const rows=Object.entries(map).map(([pid,sl])=>({playerId:pid,val:sel(sl)})).filter(x=>x.val>0)
+        .sort((a,b)=>b.val-a.val).slice(0,10).map((x,i)=>{
+          const p=player(x.playerId); const t2=p?team(p.TeamId):null;
+          return {rank:i+1,playerId:x.playerId,playerName:p?.Name||'?',photoPath:p?.PhotoPath||'',teamName:t2?.Name||'?',val:x.val};
+        });
+      return {title,col,isMvpRating:false,rows,topPlayer:null};
+    }
+    function makeMvpRating(stats) {
+      const map={}; stats.forEach(({ps})=>{ if(!map[ps.PlayerId]) map[ps.PlayerId]=[]; map[ps.PlayerId].push(ps); });
+      const rows=Object.entries(map).map(([pid,sl])=>{
+        const mvp=sl.filter(s=>s.IsMvp).length; const ratings=sl.filter(s=>s.Rating>0).map(s=>s.Rating);
+        const avg=ratings.length?Math.round(ratings.reduce((a,b)=>a+b,0)/ratings.length*100)/100:0;
+        const score=calcScore(sl); return {playerId:pid,mvp,avgRating:avg,score};
+      }).filter(x=>x.mvp>0||x.avgRating>0).sort((a,b)=>b.score-a.score).slice(0,10).map((x,i)=>{
+        const p=player(x.playerId); const t2=p?team(p.TeamId):null;
+        return {rank:i+1,playerId:x.playerId,playerName:p?.Name||'?',photoPath:p?.PhotoPath||'',teamName:t2?.Name||'?',mvp:x.mvp,avgRating:x.avgRating,score:x.score};
+      });
+      return {title:'MVP & RATING',col:'Score',isMvpRating:true,rows,topPlayer:null};
+    }
+    function makeCartellini(stats) {
+      const map={}; stats.forEach(({ps})=>{ if(!map[ps.PlayerId]) map[ps.PlayerId]=[]; map[ps.PlayerId].push(ps); });
+      const rows=Object.entries(map).map(([pid,sl])=>({playerId:pid,yellow:sl.reduce((a,s)=>a+s.YellowCards,0),red:sl.reduce((a,s)=>a+s.RedCards,0)}))
+        .filter(x=>x.yellow>0||x.red>0).sort((a,b)=>(b.yellow+b.red*2)-(a.yellow+a.red*2)).slice(0,10).map((x,i)=>{
+          const p=player(x.playerId); const t2=p?team(p.TeamId):null;
+          return {rank:i+1,playerId:x.playerId,playerName:p?.Name||'?',photoPath:p?.PhotoPath||'',teamName:t2?.Name||'?',yellow:x.yellow,red:x.red};
+        });
+      return {title:'CARTELLINI',col:'Y/R',isCartellini:true,rows};
+    }
+    function makeSection(name,filter) {
+      const stats=getGroupStats(filter); if(!stats.length) return null;
+      return {name, rankings:[makeRanking('TOP SCORER','G',stats,sl=>sl.reduce((a,s)=>a+s.Goals,0)),makeRanking('TOP ASSIST','A',stats,sl=>sl.reduce((a,s)=>a+s.Assists,0)),makeMvpRating(stats),makeRanking('CLEAN SHEET','CS',stats,sl=>sl.filter(s=>s.CleanSheet).length)], extraRankings:[makeCartellini(stats)]};
+    }
+    let sections;
+    if (isNaz) {
+      sections=[makeSection('TOTALE',n=>true),makeSection('CAMPIONATO',n=>nh(n,'nazliga')&&!nh(n,' cup')&&!nh(n,'coppa')&&!nh(n,'supercup')&&!nh(n,'supercoppa')),makeSection('COPPA',n=>nh(n,'nazliga')&&(nh(n,' cup')||nh(n,'coppa'))&&!nh(n,'supercup')&&!nh(n,'supercoppa')),makeSection('SUPERCOPPA',n=>nh(n,'nazliga')&&(nh(n,'supercup')||nh(n,'supercoppa')))];
+    } else {
+      sections=[makeSection('TOTALE',n=>true),makeSection('CAMPIONATO',n=>!nh(n,'merda')&&!nh(n,'nazliga')&&!nh(n,'supercup')&&!nh(n,'supercoppa')&&!nh(n,' cup')&&!nh(n,'coppa')&&!nh(n,'coupe')&&!nh(n,'copa')),makeSection('COPPA',n=>!nh(n,'merda')&&!nh(n,'nazliga')&&!nh(n,'supercup')&&!nh(n,'supercoppa')&&(nh(n,' cup')||nh(n,'coppa')||nh(n,'coupe')||nh(n,'copa'))),makeSection('SUPERCOPPA',n=>!nh(n,'merda')&&!nh(n,'nazliga')&&(nh(n,'supercup')||nh(n,'supercoppa'))),makeSection('MERDA CHAMPIONSHIP',n=>nh(n,'merda')&&nh(n,'championship')),makeSection('MERDA CUP',n=>nh(n,'merda')&&!nh(n,'championship')&&!nh(n,'supercup')&&!nh(n,'supercoppa')&&!nh(n,'superlega')&&(nh(n,' cup')||nh(n,'coppa'))),makeSection('SUPERLEGA MEUSANA',n=>nh(n,'superlega')),makeSection('SUPERCOPPA MEUSANA',n=>nh(n,'merda')&&(nh(n,'supercup')||nh(n,'supercoppa')))];
+    }
+    return sections.filter(Boolean);
+  }
+
+  function getLeagueBestPlayers(leagueId) {
+    const leagueTeamIds = new Set(D.Teams.filter(t=>t.LeagueId===leagueId).map(t=>t.Id));
+    const lg = D.Leagues.find(l=>l.Id===leagueId);
+    const isNaz = isNazliga(lg?.Name||'');
+    const allPlayerIds = isNaz ? null : new Set(D.Players.filter(p=>leagueTeamIds.has(p.TeamId)||(p.TeamHistory||[]).some(h=>leagueTeamIds.has(h.TeamId))).map(p=>p.Id));
+    const concluded = (D.Seasons||[]).filter(s=>s.IsConcluded&&s.Name).sort((a,b)=>a.Name.localeCompare(b.Name));
+    const byLabel = {};
+    function tryAdd(label, icon, winner, season) {
+      if (!winner) return;
+      if (allPlayerIds && !allPlayerIds.has(winner.playerId)) return;
+      if (!byLabel[label]) byLabel[label]={iconPath:icon||'',entries:[]};
+      if (!byLabel[label].entries.find(e=>e.season===season))
+        byLabel[label].entries.push({playerId:winner.playerId,playerName:winner.playerName,photoPath:winner.photoPath,season});
+    }
+    for (const si of concluded) {
+      const tIds = new Set(D.Tournaments.filter(t=>t.Season===si.Name).map(t=>t.Id));
+      const matches = D.Matches.filter(m=>tIds.has(m.TournamentId));
+      const nazIds = new Set([...tIds].filter(tid=>isNazliga(tourn(tid)?.Name||'')));
+      const nazAgg = buildAgg(matches.filter(m=>nazIds.has(m.TournamentId)));
+      const aw = si.Awards||{};
+      if (isNaz) {
+        tryAdd('Beast Nazliga Player',aw.BeastMerdaPlayerIcon,nazAgg.sort((a,b)=>b.totalScore-a.totalScore)[0],si.Name);
+        tryAdd('Best Nazliga Scorer',aw.BestMerdaScorerIcon,nazAgg.sort((a,b)=>b.goals-a.goals)[0],si.Name);
+      } else {
+        const agg=buildAgg(matches);
+        const merdaIds=new Set([...tIds].filter(tid=>isMerda(tourn(tid)?.Name||'')));
+        const mAgg=buildAgg(matches.filter(m=>merdaIds.has(m.TournamentId)));
+        tryAdd('Merda POTY',aw.MerdaPOTYIcon,mAgg.sort((a,b)=>b.mvpCount-a.mvpCount||b.avgRating-a.avgRating||b.totalScore-a.totalScore)[0],si.Name);
+        tryAdd('Beast Merda Player',aw.BeastMerdaPlayerIcon,agg.sort((a,b)=>b.totalScore-a.totalScore)[0],si.Name);
+        tryAdd('Best Merda Scorer',aw.BestMerdaScorerIcon,agg.sort((a,b)=>b.goals-a.goals)[0],si.Name);
+        tryAdd('Beast Goalkeeper',aw.BestRoleIcon,agg.filter(x=>isGK(x.role)).sort((a,b)=>b.totalScore-a.totalScore||b.cleanSheets-a.cleanSheets)[0],si.Name);
+        tryAdd('Beast Defender',aw.BestRoleIcon,agg.filter(x=>isDEF(x.role)).sort((a,b)=>b.totalScore-a.totalScore)[0],si.Name);
+        tryAdd('Beast Midfielder',aw.BestRoleIcon,agg.filter(x=>isMID(x.role)).sort((a,b)=>b.totalScore-a.totalScore)[0],si.Name);
+        tryAdd('Beast Forward',aw.BestRoleIcon,agg.filter(x=>isFWD(x.role)).sort((a,b)=>b.goals-a.goals||b.totalScore-a.totalScore)[0],si.Name);
+        tryAdd('Beast Nazliga Player',aw.BeastMerdaPlayerIcon,nazAgg.sort((a,b)=>b.totalScore-a.totalScore)[0],si.Name);
+        tryAdd('Best Nazliga Scorer',aw.BestMerdaScorerIcon,nazAgg.sort((a,b)=>b.goals-a.goals)[0],si.Name);
+      }
+    }
+    return Object.entries(byLabel).filter(([,v])=>v.entries.length).map(([label,v])=>({
+      label, iconPath:v.iconPath, leagueLogo:lg?.LogoPath||'',
+      entries: v.entries.sort((a,b)=>b.season.localeCompare(a.season)).map(e=>({player:{playerId:e.playerId,playerName:e.playerName,photoPath:e.photoPath},season:e.season})),
+      teamLogo:'', teamPrimary:'#1a2a4a', teamSecondary:'#ffffff'
+    }));
+  }
+
+  function getTeam(id) {
+    const t = D.Teams.find(x=>x.Id===id); if(!t) return null;
+    const lg = D.Leagues.find(l=>l.Id===t.LeagueId);
+    let formationData = null;
+    if (t.Formation) {
+      const slots = (t.Formation.Slots||[]).map(s=>{ const p=s.PlayerId?player(s.PlayerId):null; return {position:s.Position||s.position||'',index:s.Index||s.index||0,playerId:s.PlayerId||s.playerId||'',playerName:p?.Name||'',photoPath:p?.PhotoPath||'',role:p?.Role||p?.Role||''}; });
+      formationData = {module:t.Formation.Module, slots};
+    }
+    const tOut={id:t.Id,name:t.Name,abbr:t.Abbr,logoPath:t.LogoPath,homeKit:t.HomeKit?{primaryColor:t.HomeKit.PrimaryColor,secondaryColor:t.HomeKit.SecondaryColor,style:t.HomeKit.Style}:null,awayKit:t.AwayKit?{primaryColor:t.AwayKit.PrimaryColor,secondaryColor:t.AwayKit.SecondaryColor,style:t.AwayKit.Style}:null,type:t.Type,leagueId:t.LeagueId};
+    const lgOut=lg?{id:lg.Id,name:lg.Name,logoPath:lg.LogoPath,nationName:lg.NationName}:null;
+    return {team:tOut,league:lgOut,formation:formationData};
+  }
+
+  function getTeamPlayers(teamId) {
+    return D.Players.filter(p=>p.TeamId===teamId).sort((a,b)=>(a.Role||'').localeCompare(b.Role||'')||(a.Number||0)-(b.Number||0))
+      .map(p=>({id:p.Id,name:p.Name,role:p.Role,number:p.Number,photoPath:p.PhotoPath,nationName:p.NationName}));
+  }
+
+  function getTeamStats(teamId, season) {
+    let matches = D.Matches.filter(m=>(m.HomeTeamId===teamId||m.AwayTeamId===teamId)&&m.PlayerStats&&m.PlayerStats.length>0);
+    if (season && season!=='ALL') { const tIds=new Set(D.Tournaments.filter(t=>t.Season===season).map(t=>t.Id)); matches=matches.filter(m=>tIds.has(m.TournamentId)); }
+    let w=0,d=0,l=0,gf=0,ga=0;
+    for (const m of matches) { const h=m.HomeTeamId===teamId; const sc=h?m.ScoreHome:m.ScoreAway; const cn=h?m.ScoreAway:m.ScoreHome; gf+=sc;ga+=cn; if(sc>cn)w++;else if(sc===cn)d++;else l++; }
+    const trophies=D.TeamTrophies.filter(tt=>tt.TeamId===teamId).map(tt=>{const t2=tourn(tt.TournamentId);return{title:tt.Title,iconPath:tt.IconPath,tournamentName:t2?.Name||'',season:t2?.Season||''};}).sort((a,b)=>b.season.localeCompare(a.season));
+    return {played:w+d+l,won:w,drawn:d,lost:l,goalsFor:gf,goalsAgainst:ga,points:w*3+d,trophies};
+  }
+
+  function getTeamLeagueStats(teamId, season) {
+    const t = D.Teams.find(x=>x.Id===teamId); if(!t) return [];
+    const playerIds = new Set(D.Players.filter(p=>p.TeamId===teamId||(p.TeamHistory||[]).some(h=>h.TeamId===teamId)).map(p=>p.Id));
+    let matches = D.Matches.filter(m=>(m.HomeTeamId===teamId||m.AwayTeamId===teamId)&&m.PlayerStats&&m.PlayerStats.length>0);
+    if (season && season!=='ALL') { const tIds=new Set(D.Tournaments.filter(t2=>t2.Season===season).map(t2=>t2.Id)); matches=matches.filter(m=>tIds.has(m.TournamentId)); }
+    const teamSet = new Set([teamId]);
+    const agg = buildAgg(matches, teamSet);
+    function makeRanking(title,col,sel) {
+      const rows=agg.filter(x=>sel(x)>0).sort((a,b)=>sel(b)-sel(a)).slice(0,10).map((x,i)=>({rank:i+1,playerId:x.playerId,playerName:x.playerName,photoPath:x.photoPath,teamName:x.teamName,val:sel(x)}));
+      return {title,col,isMvpRating:false,rows,topPlayer:null};
+    }
+    const map={};
+    matches.forEach(m=>{(m.PlayerStats||[]).filter(ps=>teamSet.has(ps.TeamId)).forEach(ps=>{if(!map[ps.PlayerId])map[ps.PlayerId]=[];map[ps.PlayerId].push(ps);});});
+    const mvpRows=Object.entries(map).map(([pid,sl])=>{
+      const mvp=sl.filter(s=>s.IsMvp).length; const ratings=sl.filter(s=>s.Rating>0).map(s=>s.Rating);
+      const avg=ratings.length?Math.round(ratings.reduce((a,b)=>a+b,0)/ratings.length*100)/100:0;
+      const score=calcScore(sl); return {playerId:pid,mvp,avgRating:avg,score};
+    }).filter(x=>x.mvp>0||x.avgRating>0).sort((a,b)=>b.score-a.score).slice(0,10).map((x,i)=>{
+      const p=player(x.playerId); const t2=p?team(p.TeamId):null;
+      return {rank:i+1,playerId:x.playerId,playerName:p?.Name||'?',photoPath:p?.PhotoPath||'',teamName:t2?.Name||'?',mvp:x.mvp,avgRating:x.avgRating,score:x.score};
+    });
+    const cartRows=Object.entries(map).map(([pid,sl])=>({playerId:pid,yellow:sl.reduce((a,s)=>a+s.YellowCards,0),red:sl.reduce((a,s)=>a+s.RedCards,0)}))
+      .filter(x=>x.yellow>0||x.red>0).sort((a,b)=>(b.yellow+b.red*2)-(a.yellow+a.red*2)).slice(0,10).map((x,i)=>{
+        const p=player(x.playerId); const t2=p?team(p.TeamId):null;
+        return {rank:i+1,playerId:x.playerId,playerName:p?.Name||'?',photoPath:p?.PhotoPath||'',teamName:t2?.Name||'?',yellow:x.yellow,red:x.red};
+      });
+    return [{name:'TOTALE',rankings:[makeRanking('TOP SCORER','G',x=>x.goals),makeRanking('TOP ASSIST','A',x=>x.assists),{title:'MVP & RATING',col:'Score',isMvpRating:true,rows:mvpRows,topPlayer:null},makeRanking('CLEAN SHEET','CS',x=>x.cleanSheets)],extraRankings:[{title:'CARTELLINI',col:'Y/R',isCartellini:true,rows:cartRows}]}];
+  }
+
+  function getTeamBestPlayers(teamId) {
+    const concluded = (D.Seasons||[]).filter(s=>s.IsConcluded&&s.Name).sort((a,b)=>a.Name.localeCompare(b.Name));
+    const byLabel={};
+    function tryAdd(label,icon,winner,season) {
+      if(!winner) return;
+      if(!byLabel[label]) byLabel[label]={iconPath:icon||'',entries:[]};
+      if(!byLabel[label].entries.find(e=>e.season===season))
+        byLabel[label].entries.push({playerId:winner.playerId,playerName:winner.playerName,photoPath:winner.photoPath,season});
+    }
+    const teamSet=new Set([teamId]);
+    for (const si of concluded) {
+      const tIds=new Set(D.Tournaments.filter(t=>t.Season===si.Name).map(t=>t.Id));
+      const matches=D.Matches.filter(m=>tIds.has(m.TournamentId)&&(m.HomeTeamId===teamId||m.AwayTeamId===teamId));
+      const agg=buildAgg(matches,teamSet);
+      const merdaIds=new Set([...tIds].filter(tid=>isMerda(tourn(tid)?.Name||'')));
+      const mAgg=buildAgg(matches.filter(m=>merdaIds.has(m.TournamentId)),teamSet);
+      const nazIds=new Set([...tIds].filter(tid=>isNazliga(tourn(tid)?.Name||'')));
+      const nazAgg=buildAgg(matches.filter(m=>nazIds.has(m.TournamentId)));
+      const aw=si.Awards||{};
+      tryAdd('Merda POTY',aw.MerdaPOTYIcon,mAgg.sort((a,b)=>b.mvpCount-a.mvpCount||b.avgRating-a.avgRating||b.totalScore-a.totalScore)[0],si.Name);
+      tryAdd('Beast Merda Player',aw.BeastMerdaPlayerIcon,agg.sort((a,b)=>b.totalScore-a.totalScore)[0],si.Name);
+      tryAdd('Best Merda Scorer',aw.BestMerdaScorerIcon,agg.sort((a,b)=>b.goals-a.goals)[0],si.Name);
+      tryAdd('Beast Goalkeeper',aw.BestRoleIcon,agg.filter(x=>isGK(x.role)).sort((a,b)=>b.totalScore-a.totalScore||b.cleanSheets-a.cleanSheets)[0],si.Name);
+      tryAdd('Beast Defender',aw.BestRoleIcon,agg.filter(x=>isDEF(x.role)).sort((a,b)=>b.totalScore-a.totalScore)[0],si.Name);
+      tryAdd('Beast Midfielder',aw.BestRoleIcon,agg.filter(x=>isMID(x.role)).sort((a,b)=>b.totalScore-a.totalScore)[0],si.Name);
+      tryAdd('Beast Forward',aw.BestRoleIcon,agg.filter(x=>isFWD(x.role)).sort((a,b)=>b.goals-a.goals||b.totalScore-a.totalScore)[0],si.Name);
+      tryAdd('Beast Nazliga Player',aw.BeastMerdaPlayerIcon,nazAgg.sort((a,b)=>b.totalScore-a.totalScore)[0],si.Name);
+      tryAdd('Best Nazliga Scorer',aw.BestMerdaScorerIcon,nazAgg.sort((a,b)=>b.goals-a.goals)[0],si.Name);
+    }
+    return Object.entries(byLabel).filter(([,v])=>v.entries.length).map(([label,v])=>({
+      label,iconPath:v.iconPath,entries:v.entries.sort((a,b)=>b.season.localeCompare(a.season)).map(e=>({player:{playerId:e.playerId,playerName:e.playerName,photoPath:e.photoPath},season:e.season}))
+    }));
+  }
+
+  function getTeamPalmares(teamId) {
+    return D.TeamTrophies.filter(tt=>tt.TeamId===teamId).map(tt=>{const t2=tourn(tt.TournamentId);return{title:tt.Title,iconPath:tt.IconPath,tournamentName:t2?.Name||'',season:t2?.Season||'',group:getTournGroup(t2?.Name||'')};}).sort((a,b)=>b.season.localeCompare(a.season));
+  }
+
+  function getPlayer(id) {
+    const p = D.Players.find(x=>x.Id===id); if(!p) return null;
+    const tm=team(p.TeamId); const lg=tm?league(tm.LeagueId):null;
+
+    // Tutti i match con stats di questo giocatore
+    const allMatchStats=D.Matches.filter(m=>(m.PlayerStats||[]).some(ps=>ps.PlayerId===id))
+      .flatMap(m=>(m.PlayerStats||[]).filter(ps=>ps.PlayerId===id).map(ps=>({
+        tournamentId:m.TournamentId, homeTeamId:m.HomeTeamId, awayTeamId:m.AwayTeamId, ps,
+        season:tourn(m.TournamentId)?.Season||'?'
+      })));
+
+    const allStats=allMatchStats.map(x=>x.ps);
+    const goals=allStats.reduce((a,s)=>a+(s.Goals||0),0);
+    const assists=allStats.reduce((a,s)=>a+(s.Assists||0),0);
+    const cs=allStats.filter(s=>s.CleanSheet).length;
+    const mvp=allStats.filter(s=>s.IsMvp).length;
+    const ratings=allStats.filter(s=>s.Rating>0).map(s=>s.Rating);
+    const avg=ratings.length?Math.round(ratings.reduce((a,b)=>a+b,0)/ratings.length*100)/100:0;
+
+    // Determina la squadra del giocatore per ogni match (considerando trasferimenti)
+    function getTeamForMatch(season, homeTeamId, awayTeamId) {
+      if(p.TeamHistory&&p.TeamHistory.length) {
+        const h=p.TeamHistory.filter(h=>(h.Season||'').startsWith(season));
+        const match=h.find(h=>h.TeamId===homeTeamId||h.TeamId===awayTeamId);
+        if(match) return match.TeamId;
+        if(h.length) return h[0].TeamId;
+      }
+      return p.TeamId;
+    }
+
+    // seasonStats: raggruppa per (stagione, squadra)
+    const stMap={};
+    for(const x of allMatchStats) {
+      const teamId=getTeamForMatch(x.season,x.homeTeamId,x.awayTeamId);
+      const key=`${x.season}|${teamId}`;
+      if(!stMap[key]) stMap[key]={season:x.season,teamId,stats:[]};
+      stMap[key].stats.push({...x.ps,tournamentId:x.tournamentId});
+    }
+
+    function makeRow(season,teamId,statList,isSubtotal) {
+      const tm2=teamId?team(teamId):null;
+      const lg2=tm2?league(tm2.LeagueId):null;
+      let natG=0,natA=0,merdaG=0,merdaA=0,otherG=0,otherA=0;
+      const mB={MCH:[0,0],MCU:[0,0],MSL:[0,0],MSC:[0,0]};
+      const oB={NLG:[0,0],NCU:[0,0],NSC:[0,0]};
+      for(const s of statList) {
+        const grp=getTournGroup(tourn(s.tournamentId)?.Name||'');
+        const g=s.Goals||0,a=s.Assists||0;
+        if(grp==='LEAGUE'||grp==='CUP'){natG+=g;natA+=a;}
+        else if(grp==='MC'){merdaG+=g;merdaA+=a;mB.MCH[0]+=g;mB.MCH[1]+=a;}
+        else if(grp==='CM'){merdaG+=g;merdaA+=a;mB.MCU[0]+=g;mB.MCU[1]+=a;}
+        else if(grp==='SM'){merdaG+=g;merdaA+=a;mB.MSL[0]+=g;mB.MSL[1]+=a;}
+        else if(grp==='SC'){merdaG+=g;merdaA+=a;mB.MSC[0]+=g;mB.MSC[1]+=a;}
+        else if(grp==='NLG'){otherG+=g;otherA+=a;oB.NLG[0]+=g;oB.NLG[1]+=a;}
+        else if(grp==='NCU'){otherG+=g;otherA+=a;oB.NCU[0]+=g;oB.NCU[1]+=a;}
+        else if(grp==='NSC'){otherG+=g;otherA+=a;oB.NSC[0]+=g;oB.NSC[1]+=a;}
+      }
+      const mDetail=Object.entries(mB).filter(([,v])=>v[0]>0||v[1]>0).map(([k,v])=>`${k}:${v[0]}G ${v[1]}A`).join(', ');
+      const oDetail=Object.entries(oB).filter(([,v])=>v[0]>0||v[1]>0).map(([k,v])=>`${k}:${v[0]}G ${v[1]}A`).join(', ');
+      const rts=statList.filter(s=>s.Rating>0).map(s=>s.Rating);
+      return {
+        season:isSubtotal?(teamId?'TOTAL':'CAREER'):season,
+        isSubtotal,
+        teamName:tm2?.Name||(isSubtotal&&!teamId?'ALL TEAMS':'?'),
+        teamLogo:tm2?.LogoPath||'',
+        leagueName:lg2?.Name||'',leagueLogo:lg2?.LogoPath||'',
+        natG,natA,merdaG,merdaA,merdaDetail:mDetail,otherG,otherA,otherDetail:oDetail,
+        goals:statList.reduce((a,s)=>a+(s.Goals||0),0),
+        assists:statList.reduce((a,s)=>a+(s.Assists||0),0),
+        mvp:statList.filter(s=>s.IsMvp).length,
+        cleanSheets:statList.filter(s=>s.CleanSheet).length,
+        yellowCards:statList.reduce((a,s)=>a+(s.YellowCards||0),0),
+        redCards:statList.reduce((a,s)=>a+(s.RedCards||0),0),
+        matches:statList.length,
+        avgRating:rts.length?Math.round(rts.reduce((a,b)=>a+b,0)/rts.length*100)/100:0,
+        totalScore:Math.round(calcScore(statList)*10)/10
+      };
+    }
+
+    // Raggruppa per squadra, poi per stagione dentro ogni squadra
+    const byTeam={};
+    for(const [key,val] of Object.entries(stMap)) {
+      if(!byTeam[val.teamId]) byTeam[val.teamId]={teamId:val.teamId,seasons:{}};
+      byTeam[val.teamId].seasons[val.season]=val.stats;
+    }
+    const seasonStats=[];
+    const teamIds=Object.keys(byTeam).sort((a,b)=>{
+      const minA=Math.min(...Object.keys(byTeam[a].seasons));
+      const minB=Math.min(...Object.keys(byTeam[b].seasons));
+      return String(minA).localeCompare(String(minB));
+    });
+    for(const tid of teamIds) {
+      const tSeasons=Object.entries(byTeam[tid].seasons).sort((a,b)=>a[0].localeCompare(b[0]));
+      for(const [s,stats] of tSeasons) seasonStats.push(makeRow(s,tid,stats,false));
+      if(tSeasons.length>1) {
+        const allS=tSeasons.flatMap(([,stats])=>stats);
+        seasonStats.push(makeRow('TOTAL',tid,allS,true));
+      }
+    }
+    if(teamIds.length>1) seasonStats.push(makeRow('CAREER',null,allStats.map((s,i)=>({...s,tournamentId:allMatchStats[i]?.tournamentId})),true));
+
+    // Trofei personali
+    const catLabel={goals:'Capocannoniere',assists:'Assist Leader',mvp:'MVP',clean:'Clean Sheet'};
+    const personalTrophies=D.PlayerTrophies.filter(pt=>(pt.PlayerIds||[]).includes(id)).map(pt=>{
+      const t2=tourn(pt.TournamentId);
+      return {category:pt.Category,label:catLabel[pt.Category]||pt.Category,iconPath:pt.IconPath,tournamentName:t2?.Name||'',season:t2?.Season||''};
+    }).sort((a,b)=>b.season.localeCompare(a.season));
+
+    // Trofei squadra (con logica trasferimenti)
+    function getTeamsForSeason(season) {
+      if(p.TeamHistory&&p.TeamHistory.length) {
+        const ts=p.TeamHistory.filter(h=>(h.Season||'').startsWith(season)&&h.TeamId).map(h=>h.TeamId);
+        if(ts.length) return new Set(ts);
+      }
+      return new Set([p.TeamId]);
+    }
+    const teamTrophies=D.TeamTrophies.filter(tt=>{
+      if(!tt.TournamentId||!tt.TeamId) return false;
+      const t2=tourn(tt.TournamentId);if(!t2) return false;
+      return getTeamsForSeason(t2.Season||'').has(tt.TeamId);
+    }).map(tt=>{
+      const t2=tourn(tt.TournamentId);const tm2=team(tt.TeamId);
+      return {title:tt.Title,iconPath:tt.IconPath,tournamentName:t2?.Name||'',season:t2?.Season||'',teamName:tm2?.Name||''};
+    }).sort((a,b)=>a.season.localeCompare(b.season));
+
+    const pOut={id:p.Id,name:p.Name,role:p.Role,number:p.Number,photoPath:p.PhotoPath,nationName:p.NationName,teamId:p.TeamId};
+    const tmOut=tm?{id:tm.Id,name:tm.Name,logoPath:tm.LogoPath,homeKit:tm.HomeKit?{primaryColor:tm.HomeKit.PrimaryColor,secondaryColor:tm.HomeKit.SecondaryColor}:null}:null;
+    const lgOut2=lg?{id:lg.Id,name:lg.Name,logoPath:lg.LogoPath}:null;
+    return {
+      player:pOut,team:tmOut,league:lgOut2,leagueName:lg?.Name||'',
+      totalGoals:goals,totalAssists:assists,totalCleanSheets:cs,
+      totalMvp:mvp,totalMatches:allStats.length,avgRating:avg,totalScore:calcScore(allStats),
+      personalTrophies,teamTrophies,seasonStats,seasonAwards:[]
+    };
+  }
+
+  function getTournaments(season) {
+    let ts = D.Tournaments;
+    if (season&&season!=='ALL') ts=ts.filter(t=>t.Season===season);
+    return ts.map(t=>({
+      id:t.Id, name:t.Name, season:t.Season, type:t.Type, logo:t.Logo,
+      teamIds:t.TeamIds, leagueId:t.LeagueId,
+      teamCount:(t.TeamIds||[]).length
+    }));
+  }
+
+  function getTournament(id) {
+    const t=D.Tournaments.find(x=>x.Id===id); if(!t) return null;
+    const teams=(t.TeamIds||[]).map(tid=>{const tm=team(tid);return tm?{id:tm.Id,name:tm.Name,logoPath:tm.LogoPath}:null;}).filter(Boolean);
+    return {...t,teams};
+  }
+
+  function getTournamentStandings(id) {
+    const t=D.Tournaments.find(x=>x.Id===id); if(!t) return [];
+    const teamIds=new Set(t.TeamIds||[]);
+    const matches=D.Matches.filter(m=>m.TournamentId===id&&m.PlayerStats&&m.PlayerStats.length>0);
+    const table={};
+    teamIds.forEach(tid=>{table[tid]={teamId:tid,played:0,won:0,drawn:0,lost:0,goalsFor:0,goalsAgainst:0,points:0};});
+    for (const m of matches) {
+      if(!table[m.HomeTeamId]) table[m.HomeTeamId]={teamId:m.HomeTeamId,played:0,won:0,drawn:0,lost:0,goalsFor:0,goalsAgainst:0,points:0};
+      if(!table[m.AwayTeamId]) table[m.AwayTeamId]={teamId:m.AwayTeamId,played:0,won:0,drawn:0,lost:0,goalsFor:0,goalsAgainst:0,points:0};
+      const h=table[m.HomeTeamId],a=table[m.AwayTeamId];
+      const sh=m.ScoreHome||m.HomeGoals||0,sa=m.ScoreAway||m.AwayGoals||0;
+      h.played++;a.played++;h.goalsFor+=sh;h.goalsAgainst+=sa;a.goalsFor+=sa;a.goalsAgainst+=sh;
+      if(sh>sa){h.won++;h.points+=3;a.lost++;}else if(sh===sa){h.drawn++;h.points++;a.drawn++;a.points++;}else{a.won++;a.points+=3;h.lost++;}
+    }
+    return Object.values(table).map(row=>{const tm=team(row.teamId);const logo=tm?.LogoPath||'';return{...row,teamName:tm?.Name||'?',teamLogo:logo,teamLogoPath:logo,homePrimary:tm?.HomeKit?.PrimaryColor||'#888',goalDiff:row.goalsFor-row.goalsAgainst};}).sort((a,b)=>b.points-a.points||b.goalDiff-a.goalDiff||b.goalsFor-a.goalsFor);
+  }
+
+  function getTournamentMatches(id) {
+    return D.Matches.filter(m=>m.TournamentId===id).map(m=>{
+      const ht=team(m.HomeTeamId||m.TeamHomeId),at=team(m.AwayTeamId||m.TeamAwayId);
+      const sh=m.ScoreHome||m.HomeGoals||0,sa=m.ScoreAway||m.AwayGoals||0;
+      return {id:m.Id,tournamentId:m.TournamentId,
+        homeTeamId:m.HomeTeamId,awayTeamId:m.AwayTeamId,
+        homeTeamName:ht?.Name||'?',homeTeamLogo:ht?.LogoPath||'',
+        awayTeamName:at?.Name||'?',awayTeamLogo:at?.LogoPath||'',
+        scoreHome:sh,scoreAway:sa,
+        isPlayed:!!(m.PlayerStats&&m.PlayerStats.length>0),
+        matchday:m.Matchday,phase:m.Phase,groupIndex:m.GroupIndex,notes:m.Notes};
+    });
+  }
+
+  function getTournamentScorers(id) {
+    const matches=D.Matches.filter(m=>m.TournamentId===id&&m.PlayerStats&&m.PlayerStats.length>0);
+    const agg=buildAgg(matches);
+    return agg.filter(x=>x.goals>0).sort((a,b)=>b.goals-a.goals).slice(0,20);
+  }
+
+  function getMatchDetail(id) {
+    const m=D.Matches.find(x=>x.Id===id); if(!m) return null;
+    const ht=team(m.HomeTeamId),at=team(m.AwayTeamId);
+    const playerStats=(m.PlayerStats||[]).map(ps=>{const p=player(ps.PlayerId);return{...ps,playerName:p?.Name||'?',photoPath:p?.PhotoPath||''};});
+    return {...m,homeTeamName:ht?.Name||'?',homeTeamLogo:ht?.LogoPath||'',awayTeamName:at?.Name||'?',awayTeamLogo:at?.LogoPath||'',playerStats};
+  }
+
+  function getPlayerStats(season, stat='totalscore', top=20) {
+    let matches=D.Matches.filter(m=>m.PlayerStats&&m.PlayerStats.length>0);
+    if(season&&season!=='ALL'){const tIds=new Set(D.Tournaments.filter(t=>t.Season===season).map(t=>t.Id));matches=matches.filter(m=>tIds.has(m.TournamentId));}
+    const agg=buildAgg(matches);
+    const sorters={goals:(a,b)=>b.goals-a.goals,assists:(a,b)=>b.assists-a.assists,cleansheets:(a,b)=>b.cleanSheets-a.cleanSheets,mvp:(a,b)=>b.mvpCount-a.mvpCount,totalscore:(a,b)=>b.totalScore-a.totalScore};
+    return agg.sort(sorters[stat]||sorters.totalscore).slice(0,top);
+  }
+
+  function getInternationalTrophies() {
+    const concluded=(D.Seasons||[]).filter(s=>s.IsConcluded&&s.Name).sort((a,b)=>b.Name.localeCompare(a.Name));
+    const byLabel={};
+    for (const si of concluded) {
+      const tIds=new Set(D.Tournaments.filter(t=>t.Season===si.Name).map(t=>t.Id));
+      const matches=D.Matches.filter(m=>tIds.has(m.TournamentId));
+      const aw=si.Awards||{};
+      const merdaIds=new Set([...tIds].filter(tid=>isMerda(tourn(tid)?.Name||'')));
+      const mAgg=buildAgg(matches.filter(m=>merdaIds.has(m.TournamentId)));
+      const agg=buildAgg(matches);
+      const nazIds=new Set([...tIds].filter(tid=>isNazliga(tourn(tid)?.Name||'')));
+      const nazAgg=buildAgg(matches.filter(m=>nazIds.has(m.TournamentId)));
+      function addW(label,icon,w) {
+        if(!w) return;
+        if(!byLabel[label]) byLabel[label]={label,iconPath:icon||'',winners:[]};
+        byLabel[label].winners.push({playerId:w.playerId,playerName:w.playerName,photoPath:w.photoPath,teamName:w.teamName,teamLogo:w.teamLogo,season:si.Name,role:w.role||''});
+      }
+      addW('Merda POTY',aw.MerdaPOTYIcon,mAgg.sort((a,b)=>b.mvpCount-a.mvpCount||b.avgRating-a.avgRating||b.totalScore-a.totalScore)[0]);
+      addW('Beast Merda Player',aw.BeastMerdaPlayerIcon,agg.sort((a,b)=>b.totalScore-a.totalScore)[0]);
+      addW('Best Merda Scorer',aw.BestMerdaScorerIcon,agg.sort((a,b)=>b.goals-a.goals)[0]);
+      addW('Beast Nazliga Player',aw.BeastMerdaPlayerIcon,nazAgg.sort((a,b)=>b.totalScore-a.totalScore)[0]);
+      addW('Best Nazliga Scorer',aw.BestMerdaScorerIcon,nazAgg.sort((a,b)=>b.goals-a.goals)[0]);
+    }
+    return Object.values(byLabel);
+  }
+
+  function getRankingTeams(season, merdaOnly=false) {
+    let matches=D.Matches.filter(m=>m.PlayerStats&&m.PlayerStats.length>0);
+    if(season&&season!=='ALL'){const tIds=new Set(D.Tournaments.filter(t=>t.Season===season).map(t=>t.Id));matches=matches.filter(m=>tIds.has(m.TournamentId));}
+    if(merdaOnly){const mIds=new Set(D.Tournaments.filter(t=>{const n=(t.Name||'').toLowerCase();return n.includes('merda championship')||n.includes('merda cup')||n.includes('merda supercup')||n.includes('superlega meusana')||n.includes('supercoppa meusana');}).map(t=>t.Id));matches=matches.filter(m=>mIds.has(m.TournamentId));}
+    const tbl={};
+    const ensure=id=>{if(!tbl[id])tbl[id]={teamId:id,played:0,won:0,drawn:0,lost:0,goalsFor:0,goalsAgainst:0,points:0,goals:0,assists:0,cleanSheets:0,mvps:0,rankPoints:0};};
+    for(const m of matches){
+      const sh=m.ScoreHome||m.HomeGoals||0,sa=m.ScoreAway||m.AwayGoals||0;
+      ensure(m.HomeTeamId);ensure(m.AwayTeamId);
+      const h=tbl[m.HomeTeamId],a=tbl[m.AwayTeamId];
+      h.played++;a.played++;h.goalsFor+=sh;h.goalsAgainst+=sa;a.goalsFor+=sa;a.goalsAgainst+=sh;
+      if(sh>sa){h.won++;h.points+=3;a.lost++;}else if(sh===sa){h.drawn++;h.points++;a.drawn++;a.points++;}else{a.won++;a.points+=3;h.lost++;}
+      for(const ps of(m.PlayerStats||[])){
+        if(!tbl[ps.TeamId])continue;
+        const ts=tbl[ps.TeamId];
+        ts.goals+=ps.Goals||0;ts.assists+=ps.Assists||0;
+        if(ps.CleanSheet)ts.cleanSheets++;
+        if(ps.IsMvp){ts.mvps++;ts.rankPoints+=ps.Rating||0;}
+      }
+    }
+    return Object.values(tbl).filter(r=>r.played>0).map(r=>{
+      const tm=team(r.teamId);const lg=tm?league(tm.LeagueId):null;
+      const totalScore=r.goals*0.3+r.assists*0.1+r.cleanSheets*0.2+r.points*0.5+r.mvps*0.5+r.rankPoints;
+      return {id:r.teamId,name:tm?.Name||'?',logoPath:tm?.LogoPath||'',
+        homePrimary:tm?.HomeKit?.PrimaryColor||'#888',
+        leagueName:lg?.Name||'',leagueLogo:lg?.LogoPath||'',
+        played:r.played,won:r.won,drawn:r.drawn,lost:r.lost,
+        goalsFor:r.goalsFor,goalsAgainst:r.goalsAgainst,goalDiff:r.goalsFor-r.goalsAgainst,
+        points:r.points,goals:r.goals,assists:r.assists,cleanSheets:r.cleanSheets,
+        mvps:r.mvps,rankPoints:Math.round(r.rankPoints*10)/10,
+        totalScore:Math.round(totalScore*10)/10,
+        trophies:D.TeamTrophies.filter(tt=>tt.TeamId===r.teamId).length};
+    }).sort((a,b)=>b.totalScore-a.totalScore||b.goalDiff-a.goalDiff);
+  }
+
+  function getRankingLeagues(season, merdaOnly=false) {
+    let allMatches=D.Matches.filter(m=>m.PlayerStats&&m.PlayerStats.length>0);
+    if(season&&season!=='ALL'){const tIds=new Set(D.Tournaments.filter(t=>t.Season===season).map(t=>t.Id));allMatches=allMatches.filter(m=>tIds.has(m.TournamentId));}
+    if(merdaOnly){
+      const mIds=new Set(D.Tournaments.filter(t=>{const n=(t.Name||'').toLowerCase();return n.includes('merda championship')||n.includes('merda cup')||n.includes('merda supercup')||n.includes('superlega meusana')||n.includes('supercoppa meusana');}).map(t=>t.Id));
+      allMatches=allMatches.filter(m=>mIds.has(m.TournamentId));
+    }
+    // Calcola stats per squadra
+    const tbl={};
+    const ensure=id=>{if(!tbl[id])tbl[id]={goals:0,assists:0,cs:0,pts:0,mvps:0,rankPts:0};};
+    for(const m of allMatches){
+      const sh=m.ScoreHome||m.HomeGoals||0,sa=m.ScoreAway||m.AwayGoals||0;
+      ensure(m.HomeTeamId);ensure(m.AwayTeamId);
+      tbl[m.HomeTeamId].pts+=sh>sa?3:sh===sa?1:0;
+      tbl[m.AwayTeamId].pts+=sa>sh?3:sh===sa?1:0;
+      for(const ps of(m.PlayerStats||[])){
+        if(!tbl[ps.TeamId])continue;
+        const ts=tbl[ps.TeamId];
+        ts.goals+=ps.Goals||0;ts.assists+=ps.Assists||0;
+        if(ps.CleanSheet)ts.cs++;
+        if(ps.IsMvp){ts.mvps++;ts.rankPts+=ps.Rating||0;}
+      }
+    }
+    return D.Leagues.map(lg=>{
+      const lgTeams=D.Teams.filter(t=>t.LeagueId===lg.Id);
+      let tc=0,g=0,a=0,cs=0,pts=0,mvps=0,rp=0;
+      for(const t of lgTeams){
+        if(!tbl[t.Id])continue;tc++;
+        const ts=tbl[t.Id];g+=ts.goals;a+=ts.assists;cs+=ts.cs;pts+=ts.pts;mvps+=ts.mvps;rp+=ts.rankPts;
+      }
+      if(tc<2)return null;
+      const mediaStat=g*0.3+a*0.1+cs*0.2+pts*0.5+mvps*0.5+rp;
+      const mediaRank=Math.round(mediaStat/tc*10)/10;
+      return {id:lg.Id,name:lg.Name,logoPath:lg.LogoPath,nationName:lg.NationName,
+        teamCount:tc,goals:g,assists:a,cleanSheets:cs,points:pts,mvps,
+        rankPoints:Math.round(rp*10)/10,mediaStat:Math.round(mediaStat*10)/10,
+        mediaRank,totalScore:mediaRank,
+        trophies:D.TeamTrophies.filter(tt=>lgTeams.some(t=>t.Id===tt.TeamId)).length};
+    }).filter(Boolean).sort((a,b)=>b.totalScore-a.totalScore||a.name.localeCompare(b.name));
+  }
+
+  function getSeasons() {
+    return (D.Seasons||[]).map(s=>({name:s.Name,isConcluded:s.IsConcluded}));
+  }
+
+  function getSeasonAwards(season) {
+    const si=(D.Seasons||[]).find(s=>s.Name===season); if(!si) return null;
+    const tIds=new Set(D.Tournaments.filter(t=>t.Season===season).map(t=>t.Id));
+    const matches=D.Matches.filter(m=>tIds.has(m.TournamentId)&&m.PlayerStats&&m.PlayerStats.length>0);
+    const agg=buildAgg(matches);
+    const merdaIds=new Set([...tIds].filter(tid=>isMerda(tourn(tid)?.Name||'')));
+    const mAgg=buildAgg(matches.filter(m=>merdaIds.has(m.TournamentId)));
+    const nazIds=new Set([...tIds].filter(tid=>isNazliga(tourn(tid)?.Name||'')));
+    const nazAgg=buildAgg(matches.filter(m=>nazIds.has(m.TournamentId)));
+    const aw=si.Awards||{};
+    const merdaPOTY=mAgg.sort((a,b)=>b.mvpCount-a.mvpCount||b.avgRating-a.avgRating||b.totalScore-a.totalScore)[0]||null;
+    const bestOverall=agg.sort((a,b)=>b.totalScore-a.totalScore)[0]||null;
+    const bestScorer=agg.sort((a,b)=>b.goals-a.goals)[0]||null;
+    const bestMvp=mAgg.sort((a,b)=>b.mvpCount-a.mvpCount||b.avgRating-a.avgRating)[0]||null;
+    const bestGK=agg.filter(x=>isGK(x.role)).sort((a,b)=>b.totalScore-a.totalScore||b.cleanSheets-a.cleanSheets)[0]||null;
+    const bestDEF=agg.filter(x=>isDEF(x.role)).sort((a,b)=>b.totalScore-a.totalScore)[0]||null;
+    const bestMID=agg.filter(x=>isMID(x.role)).sort((a,b)=>b.totalScore-a.totalScore)[0]||null;
+    const bestFWD=agg.filter(x=>isFWD(x.role)).sort((a,b)=>b.goals-a.goals||b.totalScore-a.totalScore)[0]||null;
+    const bestNazligaPlayer=nazAgg.sort((a,b)=>b.totalScore-a.totalScore)[0]||null;
+    const bestNazligaScorer=nazAgg.sort((a,b)=>b.goals-a.goals)[0]||null;
+    const xi=buildXI(agg,1);
+    return {season,isConcluded:si.IsConcluded,merdaPOTY,bestOverall,bestScorer,bestMvp,bestGK,bestDEF,bestMID,bestFWD,bestNazligaPlayer,bestNazligaScorer,xi,merdaPOTYIcon:aw.MerdaPOTYIcon,beastMerdaIcon:aw.BeastMerdaPlayerIcon,bestScorerIcon:aw.BestMerdaScorerIcon,bestRoleIcon:aw.BestRoleIcon,beastNazligaPlayerIcon:aw.BeastMerdaPlayerIcon,bestNazligaScorerIcon:aw.BestMerdaScorerIcon,teamRanking:getRankingTeams(season),leagueRanking:getRankingLeagues(season)};
+  }
+
+  function getTrophiesByMerda() {
+    const merdaTournIds=new Set(D.Tournaments.filter(t=>isMerda(t.Name||'')).map(t=>t.Id));
+    const teamTrophies=D.TeamTrophies.filter(tt=>merdaTournIds.has(tt.TournamentId)).map(tt=>{
+      const t2=tourn(tt.TournamentId);const tm=team(tt.TeamId);
+      return {title:tt.Title,iconPath:tt.IconPath,tournamentName:t2?.Name||'',tournamentLogo:t2?.Logo||'',season:t2?.Season||'',teamName:tm?.Name||'?',teamLogo:tm?.LogoPath||'',teamPrimary:tm?.HomeKit?.PrimaryColor||'#aaa'};
+    }).sort((a,b)=>b.season.localeCompare(a.season));
+    const palmares=Object.values(teamTrophies.reduce((acc,t2)=>{if(!acc[t2.teamName])acc[t2.teamName]={teamName:t2.teamName,teamLogo:t2.teamLogo,count:0,seasons:[]};acc[t2.teamName].count++;acc[t2.teamName].seasons.push(t2.season);return acc;},{})).sort((a,b)=>b.count-a.count);
+    const nh=(n,kw)=>(n||'').toLowerCase().includes(kw);
+    const cats=[{label:'Merda Championship',filter:n=>nh(n,'merda')&&nh(n,'championship')&&!nh(n,'superlega')},{label:'Merda Cup',filter:n=>nh(n,'merda')&&(nh(n,' cup')||nh(n,'coppa'))&&!nh(n,'supercup')&&!nh(n,'supercoppa')},{label:'Supercoppa Meusana',filter:n=>nh(n,'merda')&&(nh(n,'supercup')||nh(n,'supercoppa')||nh(n,'supermeusana'))},{label:'Superlega Meusana',filter:n=>nh(n,'superlega')&&nh(n,'meusana')}];
+    const byType=cats.map(cat=>{
+      const eds=teamTrophies.filter(t2=>cat.filter(t2.tournamentName));
+      return {label:cat.label,sectionIcon:eds[0]?.iconPath||'',sectionTournamentLogo:eds[0]?.tournamentLogo||'',editions:eds};
+    }).filter(c=>c.editions.length);
+    return {palmares,byType,totalEditions:teamTrophies.length};
+  }
+
+  function getTrophiesByLeague(leagueId) {
+    const lg=D.Leagues.find(l=>l.Id===leagueId); if(!lg) return null;
+    const leagueTeamIds=new Set(D.Teams.filter(t=>t.LeagueId===leagueId).map(t=>t.Id));
+    const isNaz=isNazliga(lg.Name||'');
+    const leagueTournIds=isNaz
+      ? new Set(D.Tournaments.filter(t=>isNazliga(t.Name||'')).map(t=>t.Id))
+      : new Set(D.Tournaments.filter(t=>!isMerda(t.Name||'')&&!isNazliga(t.Name||'')&&(t.TeamIds||[]).some(id=>leagueTeamIds.has(id))).map(t=>t.Id));
+    const teamTrophies=D.TeamTrophies.filter(tt=>leagueTournIds.has(tt.TournamentId)).map(tt=>{
+      const t2=tourn(tt.TournamentId);const tm=team(tt.TeamId);
+      return {title:tt.Title,iconPath:tt.IconPath,tournamentName:t2?.Name||'',tournamentLogo:t2?.Logo||'',season:t2?.Season||'',teamName:tm?.Name||'?',teamLogo:tm?.LogoPath||'',teamPrimary:tm?.HomeKit?.PrimaryColor||'#aaa'};
+    }).sort((a,b)=>b.season.localeCompare(a.season));
+    const palmares=Object.values(teamTrophies.reduce((acc,t2)=>{if(!acc[t2.teamName])acc[t2.teamName]={teamName:t2.teamName,teamLogo:t2.teamLogo,count:0,seasons:[]};acc[t2.teamName].count++;acc[t2.teamName].seasons.push(t2.season);return acc;},{})).sort((a,b)=>b.count-a.count);
+    const nh=(n,kw)=>(n||'').toLowerCase().includes(kw);
+    const cats=[{label:'Campionato',filter:n=>!nh(n,'merda')&&!nh(n,' cup')&&!nh(n,'coppa')&&!nh(n,'supercup')&&!nh(n,'supercoppa')},{label:'Coppa',filter:n=>!nh(n,'merda')&&(nh(n,' cup')||nh(n,'coppa')||nh(n,'coupe')||nh(n,'copa'))&&!nh(n,'supercup')&&!nh(n,'supercoppa')},{label:'Supercoppa',filter:n=>!nh(n,'merda')&&(nh(n,'supercup')||nh(n,'supercoppa'))}];
+    const byType=cats.map(cat=>{
+      const eds=teamTrophies.filter(t2=>cat.filter(t2.tournamentName));
+      return {label:cat.label,sectionIcon:eds[0]?.iconPath||'',sectionTournamentLogo:eds[0]?.tournamentLogo||'',editions:eds};
+    }).filter(c=>c.editions.length);
+    const lgTrOut={id:lg.Id,name:lg.Name,logoPath:lg.LogoPath,nationName:lg.NationName};
+    return {league:lgTrOut,teamTrophies,palmares,byType,playerTrophies:[]};
+  }
+
+  function getPlayerByMerda() {
+    const merdaTournIds=new Set(D.Tournaments.filter(t=>isMerda(t.Name||'')).map(t=>t.Id));
+    const catLabel={goals:'Capocannoniere',assists:'Assist Leader',mvp:'MVP',clean:'Clean Sheet'};
+    const catColor={goals:'#fbbf24',assists:'#60a5fa',mvp:'#a78bfa',clean:'#34d399'};
+    const nh=(n,kw)=>(n||'').toLowerCase().includes(kw);
+    function getMerdaGroup(n){
+      if(nh(n,'merda')&&nh(n,'championship')&&!nh(n,'superlega')) return 'Merda Championship';
+      if(nh(n,'merda')&&(nh(n,' cup')||nh(n,'coppa'))&&!nh(n,'supercup')&&!nh(n,'supercoppa')) return 'Merda Cup';
+      if(nh(n,'merda')&&(nh(n,'supercup')||nh(n,'supercoppa')||nh(n,'supermeusana'))) return 'Supercoppa Meusana';
+      if(nh(n,'superlega')&&nh(n,'meusana')) return 'Superlega Meusana';
+      return 'Merda Championship';
+    }
+    const grouped={};
+    D.PlayerTrophies.filter(pt=>merdaTournIds.has(pt.TournamentId)&&catLabel[pt.Category]).forEach(pt=>{
+      const t2=tourn(pt.TournamentId);const grp=getMerdaGroup(t2?.Name||'');const season=t2?.Season||'';
+      if(!grouped[grp]) grouped[grp]={};
+      if(!grouped[grp][pt.Category]) grouped[grp][pt.Category]={iconPath:pt.IconPath||'',tournLogo:t2?.Logo||'',seasons:{}};
+      if(!grouped[grp][pt.Category].seasons[season]) grouped[grp][pt.Category].seasons[season]=[];
+      (pt.PlayerIds||[]).forEach(pid=>{const p=player(pid);const tm=p?team(p.TeamId):null;grouped[grp][pt.Category].seasons[season].push({playerId:pid,playerName:p?.Name||'?',photoPath:p?.PhotoPath||'',teamName:tm?.Name||'',teamLogo:tm?.LogoPath||''});});
+    });
+    const order=['Merda Championship','Merda Cup','Supercoppa Meusana','Superlega Meusana'];
+    return Object.entries(grouped).sort((a,b)=>order.indexOf(a[0])-order.indexOf(b[0])).map(([grp,cats])=>({
+      groupName:grp,
+      categories:Object.entries(cats).filter(([k])=>catLabel[k]).map(([k,v])=>({
+        category:k,label:catLabel[k],color:catColor[k],iconPath:v.iconPath,tournamentLogo:v.tournLogo,
+        winnersBySeason:Object.entries(v.seasons).sort((a,b)=>b[0].localeCompare(a[0])).map(([s,players])=>({season:s,players}))
+      }))
+    }));
+  }
+
+  function getSeasonLeagues(season) {
+    const isSuper = n => { n=(n||'').toLowerCase(); return n.includes('supercup')||n.includes('supercoppa'); };
+    const isCup   = n => { n=(n||'').toLowerCase(); if(isSuper(n)) return false; return n.includes(' cup')||n.includes('coppa')||n.includes('coupe')||n.includes('copa'); };
+    const isLeague= n => { n=(n||'').toLowerCase(); if(isSuper(n)||isCup(n)) return false; return n.includes(' league')||n.endsWith('league')||n.includes('campionato')||n.includes('championship')||n.includes('division')||n.includes('liga')||n.includes('lega'); };
+    const guessLeague = name => {
+      const n=(name||'').toUpperCase();
+      if(n.includes('MERDA')) return 'MERDA';
+      if(n.includes('NAZLIGA')) return 'NAZLIGA';
+      for(const l of D.Leagues) if(n.includes(l.Name.toUpperCase())) return l.Name.toUpperCase();
+      if(n.includes('WORLD MEUSA')) return 'WORLD MEUSA TEAM';
+      return null;
+    };
+    const seasonTourns = D.Tournaments.filter(t=>t.Season===season);
+    const byLeague = {};
+    for(const t of seasonTourns) {
+      const lg = guessLeague(t.Name); if(!lg) continue;
+      if(!byLeague[lg]) byLeague[lg]=[];
+      byLeague[lg].push(t);
+    }
+    const buildComp = t => {
+      if(!t) return null;
+      const tt = D.TeamTrophies.find(tt=>tt.TournamentId===t.Id);
+      const winner = tt ? D.Teams.find(tm=>tm.Id===tt.TeamId) : null;
+      const playerTrophies = D.PlayerTrophies.filter(pt=>pt.TournamentId===t.Id).map(pt=>({
+        category:pt.Category, iconPath:pt.IconPath,
+        players:(pt.PlayerIds||[]).map(pid=>{const p=player(pid);const ptm=p?team(p.TeamId):null;return{playerId:pid,playerName:p?.Name||'?',photoPath:p?.PhotoPath||'',teamName:ptm?.Name||''};})
+      }));
+      return {tournamentId:t.Id,tournamentName:t.Name,tournamentLogo:t.Logo,
+        winnerName:winner?.Name||null,winnerLogo:winner?.LogoPath||null,
+        winnerPrimary:winner?.HomeKit?.PrimaryColor||'#aaa',
+        trophyIcon:tt?.IconPath||null,playerTrophies};
+    };
+    const buildSection = (lgName, tourns) => {
+      const lg = D.Leagues.find(l=>l.Name.toUpperCase()===lgName);
+      const campTourn  = tourns.find(t=>isLeague(t.Name));
+      const cupTourn   = tourns.find(t=>isCup(t.Name));
+      const superTourn = tourns.find(t=>isSuper(t.Name));
+      const superlegaTourn = tourns.find(t=>(t.Name||'').toLowerCase().includes('superlega')||(t.Name||'').toLowerCase().includes('championship'));
+      const camp = campTourn||(superlegaTourn&&isLeague(superlegaTourn.Name||'')?superlegaTourn:null);
+      return {leagueName:lgName,leagueLogo:lg?.LogoPath||null,
+        campionato:buildComp(camp),coppa:buildComp(cupTourn),supercoppa:buildComp(superTourn),
+        hasSuperlega:!!(superlegaTourn&&!isLeague(superlegaTourn.Name||'')),
+        superlega:buildComp(superlegaTourn&&!isLeague(superlegaTourn.Name||'')?superlegaTourn:null)};
+    };
+    const order=['MERDA','NAZLIGA','SHIT LEAGUE','PREMIER SHIT','SERIE Z','LIGA MEUSANA','MERD ONE','STERK LEAGUE','MERDEIRA LEAGUE','CULIGA','WORLD MEUSA TEAM','MEUSA DIVISION'];
+    const result=[];
+    for(const k of order) { if(byLeague[k]) result.push(buildSection(k,byLeague[k])); }
+    for(const [k,v] of Object.entries(byLeague)) { if(!order.includes(k)) result.push(buildSection(k,v)); }
+    return result;
+  }
+
+  // Routing: mappa URL → funzione
+  function route(url) {
+    const u = url.replace(/^\/?(api\/)?/,'');
+    const p = u.split('?')[0].split('/');
+    const q = Object.fromEntries(new URLSearchParams(u.includes('?')?u.split('?')[1]:''));
+    if (p[0]==='leagues' && p.length===1) return getLeagues();
+    if (p[0]==='leagues' && p[2]==='teams') return getTeamsByLeague(p[1]);
+    if (p[0]==='leagues' && p[2]==='overview') return getLeagueOverview(p[1]);
+    if (p[0]==='leagues' && p[2]==='individualtrophies') return getLeagueIndividualTrophies(p[1]);
+    if (p[0]==='leagues' && p[2]==='leaguestats') return getLeagueStats(p[1]);
+    if (p[0]==='leagues' && p[2]==='bestplayers') return getLeagueBestPlayers(p[1]);
+    if (p[0]==='teams' && p[2]==='players') return getTeamPlayers(p[1]);
+    if (p[0]==='teams' && p[2]==='stats') return getTeamStats(p[1],q.season);
+    if (p[0]==='teams' && p[2]==='leaguestats') return getTeamLeagueStats(p[1],q.season);
+    if (p[0]==='teams' && p[2]==='bestplayers') return getTeamBestPlayers(p[1]);
+    if (p[0]==='teams' && p[2]==='palmares') return getTeamPalmares(p[1]);
+    if (p[0]==='teams' && p.length===2) return getTeam(p[1]);
+    if (p[0]==='players' && p.length===2) return getPlayer(p[1]);
+    if (p[0]==='tournaments' && p[2]==='standings') return getTournamentStandings(p[1]);
+    if (p[0]==='tournaments' && p[2]==='matches') return getTournamentMatches(p[1]);
+    if (p[0]==='tournaments' && p[2]==='scorers') return getTournamentScorers(p[1]);
+    if (p[0]==='tournaments' && p.length===2) return getTournament(p[1]);
+    if (p[0]==='tournaments') return getTournaments(q.season);
+    if (p[0]==='matches' && p[2]==='detail') return getMatchDetail(p[1]);
+    if (p[0]==='playerstats' && p[1]==='internationaltrophies') return getInternationalTrophies();
+    if (p[0]==='playerstats') return getPlayerStats(q.season, q.stat||'totalscore', parseInt(q.top)||20);
+    if (p[0]==='ranking' && p[1]==='teams') return getRankingTeams(q.season, q.merdaOnly==='true');
+    if (p[0]==='ranking' && p[1]==='leagues') return getRankingLeagues(q.season, q.merdaOnly==='true');
+    if (p[0]==='seasons' && p[2]==='awards') return getSeasonAwards(p[1]);
+    if (p[0]==='seasons' && p[2]==='leagues') return getSeasonLeagues(p[1]);
+    if (p[0]==='seasons') return getSeasons();
+    if (p[0]==='trophies' && p[1]==='byMerda') return getTrophiesByMerda();
+    if (p[0]==='trophies' && p[1]==='byLeague') return getTrophiesByLeague(p[2]);
+    if (p[0]==='trophies' && p[1]==='playerByMerda') return getPlayerByMerda();
+    if (p[0]==='tournaments' && p[2]==='bracket') return getTournamentBracket(p[1]);
+    if (p[0]==='tournaments' && p[2]==='groups') return getTournamentGroups(p[1]);
+    return null;
+  }
+
+  function getTournamentBracket(id) {
+    const allM=D.Matches.filter(m=>m.TournamentId===id&&m.PlayerStats&&m.PlayerStats.length>0);
+    if(!allM.length) return [];
+    // Per knockout puro Phase='', per groups_ko le partite KO hanno Phase='ko'
+    const koM=allM.filter(m=>m.Phase==='ko'||m.Phase==='KO');
+    const useM=koM.length?koM:allM;
+    const days=[...new Set(useM.map(m=>m.Matchday||1))].sort((a,b)=>a-b);
+    if(!days.length) return [];
+    const maxDay=Math.max(...days);
+    return days.map(d=>{
+      const rM=useM.filter(m=>(m.Matchday||1)===d).map(m=>{
+        const ht=team(m.HomeTeamId||m.TeamHomeId),at=team(m.AwayTeamId||m.TeamAwayId);
+        const sh=m.ScoreHome||m.HomeGoals||0,sa=m.ScoreAway||m.AwayGoals||0;
+        return {id:m.Id,homeTeamId:m.HomeTeamId,awayTeamId:m.AwayTeamId,
+          homeTeamName:ht?.Name||'?',homeTeamLogo:ht?.LogoPath||'',
+          awayTeamName:at?.Name||'?',awayTeamLogo:at?.LogoPath||'',
+          scoreHome:sh,scoreAway:sa,isPlayed:true,round:d};
+      });
+      const diff=maxDay-d;
+      const name=diff===0?'Finale':diff===1?'Semifinale':diff===2?'Quarti':diff===3?'Ottavi':`Turno ${d}`;
+      return {round:d,name,matches:rM};
+    });
+  }
+
+  function getTournamentGroups(id) {
+    const allM=D.Matches.filter(m=>m.TournamentId===id);
+    // Phase='group' per gironi, Phase='' o mancante per tornei solo league
+    const groupM=allM.filter(m=>m.Phase==='group'||m.Phase===''||!m.Phase);
+    // Se tutti i match sono 'ko' non ci sono gironi
+    const hasGroups=allM.some(m=>m.Phase==='group');
+    const useM=hasGroups?allM.filter(m=>m.Phase==='group'):groupM;
+    const indices=[...new Set(useM.map(m=>m.GroupIndex||0))].sort((a,b)=>a-b);
+    const letters=['A','B','C','D','E','F','G','H'];
+    const mkS=gM=>{
+      const tbl={};
+      gM.filter(m=>m.PlayerStats&&m.PlayerStats.length>0).forEach(m=>{
+        const hi=m.HomeTeamId||m.TeamHomeId,ai=m.AwayTeamId||m.TeamAwayId;
+        const sh=m.ScoreHome||m.HomeGoals||0,sa=m.ScoreAway||m.AwayGoals||0;
+        if(!tbl[hi])tbl[hi]={teamId:hi,played:0,won:0,drawn:0,lost:0,goalsFor:0,goalsAgainst:0,points:0};
+        if(!tbl[ai])tbl[ai]={teamId:ai,played:0,won:0,drawn:0,lost:0,goalsFor:0,goalsAgainst:0,points:0};
+        const h=tbl[hi],a=tbl[ai];
+        h.played++;a.played++;h.goalsFor+=sh;h.goalsAgainst+=sa;a.goalsFor+=sa;a.goalsAgainst+=sh;
+        if(sh>sa){h.won++;h.points+=3;a.lost++;}else if(sh===sa){h.drawn++;h.points++;a.drawn++;a.points++;}else{a.won++;a.points+=3;h.lost++;}
+      });
+      return Object.values(tbl).map(r=>{const tm=team(r.teamId);const logo=tm?.LogoPath||'';return{...r,teamName:tm?.Name||'?',teamLogo:logo,teamLogoPath:logo,homePrimary:tm?.HomeKit?.PrimaryColor||'#888',goalDiff:r.goalsFor-r.goalsAgainst};}).sort((a,b)=>b.points-a.points||b.goalDiff-a.goalDiff);
+    };
+    const mkM=m=>{const ht=team(m.HomeTeamId||m.TeamHomeId),at=team(m.AwayTeamId||m.TeamAwayId);const sh=m.ScoreHome||m.HomeGoals||0,sa=m.ScoreAway||m.AwayGoals||0;return{id:m.Id,homeTeamId:m.HomeTeamId,awayTeamId:m.AwayTeamId,homeTeamName:ht?.Name||'?',homeTeamLogo:ht?.LogoPath||'',awayTeamName:at?.Name||'?',awayTeamLogo:at?.LogoPath||'',scoreHome:sh,scoreAway:sa,isPlayed:!!(m.PlayerStats&&m.PlayerStats.length>0)};};
+    if(!indices.length) return [{name:'Gruppo A',standings:mkS(useM),matches:useM.map(mkM)}];
+    return indices.map(gi=>{const gM=useM.filter(m=>(m.GroupIndex||0)===gi);return{name:'Gruppo '+(letters[gi]||gi+1),standings:mkS(gM),matches:gM.map(mkM)};});
+  }
+
+  return { load, route };
+})();
+
+</script>
+<script>
 // ─── UTILS ──────────────────────────────────────────────────────────────────
-const imgUrl = p => p ? `/api/image?path=${encodeURIComponent(p)}` : null;
+const imgUrl = p => { if(!p) return null; if(_useOffline) return p.replace(/\\/g,'/'); return `/api/image?path=${encodeURIComponent(p)}`; };
 
 function imgTag(path, cls='', style='', fallbackIcon='ti-photo') {
   if (!path) return `<span class="${cls}" style="${style};display:inline-flex;align-items:center;justify-content:center;background:#1f2937;border-radius:4px"><i class="ti ${fallbackIcon}" style="font-size:14px;color:#4b5563"></i></span>`;
@@ -290,7 +1215,31 @@ function roleLabel(r) {
 function fmt(n) { return n != null ? n.toLocaleString('it-IT') : '—'; }
 function fmtR(r) { return r > 0 ? r.toFixed(2) : '—'; }
 
+// Flag globale: true = usa offline layer (GitHub Pages), false = usa API locali
+let _useOffline = false;
+
+async function initOfflineLayer() {
+  try {
+    const r = await fetch('api/seasons', {signal: AbortSignal.timeout(2000)});
+    if (r.ok) { _useOffline = false; console.log('Modalità: API locale'); return; }
+    throw new Error('not ok');
+  } catch(e) {
+    console.log('API non disponibili — carico iss_data.json (modalità offline)');
+    _useOffline = true;
+    const r2 = await fetch('iss_data.json');
+    if (!r2.ok) throw new Error('iss_data.json non trovato');
+    const data = await r2.json();
+    IssOffline.load(data);
+  }
+}
+
 async function api(url) {
+  if (_useOffline) {
+    const cleanUrl = url.replace(/^\/?(?:api\/)?/, '');
+    const result = IssOffline.route(cleanUrl);
+    if (result === null) throw new Error(`Offline: nessuna route per ${url}`);
+    return result;
+  }
   const r = await fetch(url);
   if (!r.ok) throw new Error(`API ${url} -> ${r.status}`);
   return r.json();
@@ -310,6 +1259,7 @@ const CARD_TEMPLATE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAKoAAAEBCAY
 
 // ─── INIT ────────────────────────────────────────────────────────────────────
 async function init() {
+  await initOfflineLayer();
   // Carica stagioni
   const seasons = await api('/api/seasons');
   const gSel = document.getElementById('global-season');
@@ -359,7 +1309,7 @@ function switchTab(tab, btn) {
   }
   if (tab === 'competitions' && state.tournaments.length) {
     // Prima competizione della stagione più recente
-    const sorted = [...state.tournaments].sort((a,b) => b.season.localeCompare(a.season));
+    const sorted = [...state.tournaments].sort((a,b) => (b.season||'').localeCompare(a.season||''));
     if (sorted.length) setTimeout(() => selectTournament(sorted[0].id), 0);
   }
 }
@@ -1412,7 +2362,7 @@ function renderGroupKOMatchList(groups, allMatches) {
 
 
 function matchCard(m) {
-  const played = m.isPlayed ?? m.IsPlayed ?? false;
+  const played = m.isPlayed ?? m.IsPlayed ?? (m.PlayerStats&&m.PlayerStats.length>0) ?? false;
   const hw = played && m.scoreHome > m.scoreAway, aw = played && m.scoreAway > m.scoreHome;
   const score = played
     ? `<span style="font-size:15px;font-weight:700;color:#f1f5f9">${m.scoreHome} - ${m.scoreAway}</span>`
@@ -1526,23 +2476,27 @@ function renderKOTournament(t, bracket, scorers, detail, matches) {
 }
 
 function renderBracket(rounds) {
-  if (!rounds.length) return '<div class="empty"><i class="ti ti-tournament"></i>Nessun bracket disponibile</div>';
+  if (!rounds || !rounds.length) return '<div class="empty"><i class="ti ti-tournament"></i>Nessun bracket disponibile</div>';
   return `<div class="bracket">` + rounds.map(r => `
     <div class="bracket-round">
-      <div class="bracket-round-title">${r.roundName}</div>
-      ${r.matches.map(m => `
+      <div class="bracket-round-title">${r.name||r.roundName||'Round '+r.round}</div>
+      ${(r.matches||[]).map(m => {
+        const hw = m.isPlayed && m.scoreHome > m.scoreAway;
+        const aw = m.isPlayed && m.scoreAway > m.scoreHome;
+        return `
         <div class="bracket-match">
-          <div class="bracket-team ${m.homeWin?'winner':''}">
-            ${teamLogo(m.homeTeamLogo, 18)}
+          <div class="bracket-team ${hw?'winner':''}">
+            ${teamLogo(m.homeTeamLogo||m.homeTeamLogoPath, 18)}
             <span class="bname">${m.homeTeamName}</span>
-            <span class="bscore">${m.scoreHome}</span>
+            <span class="bscore">${m.isPlayed ? m.scoreHome : '-'}</span>
           </div>
-          <div class="bracket-team ${m.awayWin?'winner':''}">
-            ${teamLogo(m.awayTeamLogo, 18)}
+          <div class="bracket-team ${aw?'winner':''}">
+            ${teamLogo(m.awayTeamLogo||m.awayTeamLogoPath, 18)}
             <span class="bname">${m.awayTeamName}</span>
-            <span class="bscore">${m.scoreAway}</span>
+            <span class="bscore">${m.isPlayed ? m.scoreAway : '-'}</span>
           </div>
-        </div>`).join('')}
+        </div>`;
+      }).join('')}
     </div>`).join('') + '</div>';
 }
 
@@ -1561,11 +2515,11 @@ function renderGroupsKO(t, groups, bracket, scorers, matches) {
       <div class="grid grid-2" style="gap:16px">
         ${groups.map(g => `
           <div>
-            <div class="section-hdr"><h2>${g.groupName}</h2></div>
+            <div class="section-hdr"><h2>${g.name||g.groupName}</h2></div>
             <div class="table-wrap">
               <table>
                 <thead><tr><th>#</th><th>Squadra</th><th class="r">Pt</th><th class="r">GJ</th><th class="r">GF</th><th class="r">GS</th><th class="r">DR</th></tr></thead>
-                <tbody>${g.standing.map((s,i) => `
+                <tbody>${(g.standings||g.standing||[]).map((s,i) => `
                   <tr>
                     <td class="rank" style="color:${i<2?'#34d399':'#6b7280'}">${i+1}</td>
                     <td><div style="display:flex;align-items:center;gap:6px">
@@ -1740,7 +2694,7 @@ async function loadPlayerStats() {
                 </div>
                 <div style="text-align:center">
                   <div style="font-size:11px;font-weight:700;color:#f1f5f9">${w.playerName}</div>
-                  <div style="font-size:9px;color:#94a3b8">${w.seasons.join(', ')}${w.wins > 1 ? ` <span style="color:#fbbf24;font-weight:700">(${w.wins}x)</span>` : ''}</div>
+                  <div style="font-size:9px;color:#94a3b8">${(w.seasons||[w.season]).filter(Boolean).join(', ')}</div>
                 </div>
               </div>`).join('')}
           </div>
